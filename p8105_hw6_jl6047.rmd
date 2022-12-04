@@ -1,0 +1,244 @@
+---
+title: "p8105_hw6_jl6047"
+author: "Jiayi Luo"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(viridis)
+library(purrr)
+library(modelr)
+
+knitr::opts_chunk$set(
+	echo = TRUE,
+	warning = FALSE,
+	fig.width = 8, 
+  fig.height = 6,
+  out.width = "90%"
+)
+theme_set(theme_minimal() + theme(legend.position = "right"))
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+```
+## Problem 2 
+
+```{r, warning=FALSE, message=FALSE}
+# Import the dataset
+
+homicide_raw <- read_csv(url("https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv"), na = c("", "NA", "Unknown"))
+
+# Clean dataset,create variables city_state and resolved
+# resolved: 0 unresolved 1 resolved
+# Make sure victim age is numeric
+# Omit cities without victim race reports and error city
+# Limit victim_race to white or black
+homicide_df = homicide_raw %>% 
+  janitor::clean_names() %>%
+  mutate(reported_date = as.Date(as.character(reported_date), format = "%Y%m%d"),
+         victim_age = as.numeric(victim_age),
+         victim_race = fct_relevel(victim_race, "White"),
+         city_state = str_c(city, state, sep = ", "),
+         resolved = case_when(
+           disposition == "Closed without arrest" ~ 0,
+           disposition == "Open/No arrest" ~ 0,
+           disposition == "Closed by arrest" ~ 1)) %>% 
+        relocate(city_state) %>% 
+        filter(!city_state %in% c("Dallas, TX","Phoenix, AZ","Kansas City, MO","Tulsa, AL"),
+         victim_race %in% c("White","Black"))
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# Use  foir baltimore with resolved vs unresolved
+# Save the output to R project
+
+baltimore_logistic = homicide_df %>%
+    filter(city_state == "Baltimore, MD") %>% 
+    glm(resolved ~ victim_age + victim_race + victim_sex, data = ., family = binomial(link = "logit")) 
+
+# Broom tidy
+# Obtain estimates of OR for solving homicides comparing males vs female
+
+baltimore_logistic %>% 
+  broom::tidy(conf.int = T) %>% 
+  mutate(OR = exp(estimate),
+         CI_lower = exp(exp(conf.low)),
+         CI_upper = exp(exp(conf.high)),
+         p_val = rstatix::p_format(p.value, digits = 2)) %>% 
+  select(term, OR, CI_lower,CI_upper, p_val) %>% 
+  mutate(term = str_replace(term, "victim_age", "Age"),
+         term = str_replace(term, "victim_race", "Race: "),
+         term = str_replace(term, "victim_sex", "Sex: ")) %>% 
+  knitr::kable(digits = 3, align = "lccc", 
+               col.names = c("Term", "Estimated adjusted OR", "CI low", "CI high", "p-value"))
+```
+
+* In Baltimore, MD, controlling for all other variables, the homicides are significantly less like to be resolved in males compared to females.
+
+```{r, warning=FALSE, message=FALSE}
+#  Extract the adjusted odds ratio and CI 
+#  Compare male victims with female victims from all cities this time.
+allcities_logistic = homicide_df %>% 
+  nest(data = -city_state) %>% 
+  mutate(
+    models = map(data, ~glm(resolved ~ victim_age + victim_race + victim_sex, data = ., family = binomial(link = "logit"))),
+    results = map(models, ~broom::tidy(.x, conf.int = T))) %>% 
+  select(city_state, results) %>% 
+  unnest(results) %>% 
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(conf.low),
+    CI_upper = exp(conf.high),
+    p_val = rstatix::p_format(p.value, digits = 2)
+  ) %>% 
+  filter(term == "victim_sexMale") %>% 
+  select(city_state, OR, CI_lower,CI_upper, p_val) 
+allcities_logistic %>% 
+  knitr::kable(digits = 3, align = "llccc", col.names = c("City", "Estimated adjusted OR", "CI low", "CI high", "p-value"))
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Create the plot showing the estimated ORs and CIs for each city
+allcities_logistic %>% 
+  mutate(city_state = fct_reorder(city_state, OR)) %>%
+  ggplot(aes(x = city_state, y = OR)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  labs(x = "City", y = "Estimated OR with CI")
+```
+
+
+## Problem 3
+```{r, message=FALSE}
+birthweight = read_csv("./birthweight.csv")
+```
+
+### Data Preprocessing
+
+```{r}
+# Load data
+# clean data
+# Create categorical variables for babysex,malform, frace and mrace
+birthweight_tidy =
+  birthweight %>% 
+  janitor::clean_names() %>%
+  mutate(across(.cols = c(babysex, frace, malform, mrace), as.factor)) %>%
+  mutate(babysex = case_when(babysex == 1 ~"male", babysex == 2 ~"female"),
+         malform = case_when(malform == 0 ~"absent", malform == 1 ~ "present"),
+         frace = recode(frace, 
+                        "1" = "White", 
+                        "2" = "Black", 
+                        "3" = "Asian", 
+                        "4" = "Puerto Rican", 
+                        "8" = "Other", 
+                        "9" = "Unknown"),
+         mrace = recode(mrace, 
+                        "1" = "White", 
+                        "2" = "Black", 
+                        "3" = "Asian", 
+                        "4" = "Puerto Rican", 
+                        "8" = "Other"))
+# check missing values
+sum(is.na(birthweight_tidy))
+```
+
+
+```{r, message=FALSE}
+# Propose a Regression Model for Birthweight
+# Select variables with stepwise method
+mult_fit = lm(bwt ~ ., data=birthweight_tidy)
+step(mult_fit, direction="both")
+```
+
+After stepwise selection,
+variables `babysex`, `bhead`, `blength`, `delwt`, `fincome`, `gaweeks`, `mheight`, `mrace`, `parity`, `ppwt` and `smoken` are left.
+
+```{r}
+#run linear regression to check fitness of the model
+mult_fit_1 = lm(bwt ~  babysex + bhead + blength + delwt + fincome + gaweeks + mheight + mrace + parity + ppwt + smoken,
+              data=birthweight_tidy)
+summary(mult_fit_1)
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+fit_var = birthweight_tidy %>%
+  select(bhead, blength, delwt, fincome, gaweeks, mheight, parity, ppwt, smoken)
+# Check correlation matrix 
+cor(fit_var)
+# Create a scatter plot matrix
+pairs(fit_var)
+```
+
+Conclusion:
+There could exist collinearity between delwt and ppwt, also bhead and blength.
+So I decide to drop one of each from the collinear groups, `ppwt` and `blength` whose p-values are relatively larger, so drop these 2 to create a new model.
+
+```{r}
+#model 2
+mult_fit_2 = lm(bwt ~  babysex + bhead + delwt + fincome + gaweeks + mheight + mrace + parity + smoken,
+              data=birthweight_tidy)
+summary(mult_fit_2)
+```
+
+Next, I will show a plot of model residuals against fitted values.
+
+```{r, message=FALSE}
+birthweight_tidy %>%
+  add_residuals(mult_fit_2) %>%
+  add_predictions(mult_fit_2) %>%
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "Model Residuals vs. Fitted Values",
+       x = "Fitted Values", y = "Model Residuals") 
+```
+
+
+The constant variance assumption is generally satisfied with most residuals scattered around 0 and extremes appear when prediciton is below 1000, of which are a small portion.
+
+```{r,message=FALSE, warning=FALSE}
+# Compare the models
+fit_com_1 = lm(bwt ~ blength + gaweeks, data = birthweight_tidy)
+fit_com_2 = lm(bwt ~ bhead + blength + babysex + bhead*blength + bhead*babysex + blength*babysex + bhead*blength*babysex,
+               data = birthweight_tidy)
+# Cross Validation 
+cv_df = 
+  crossv_mc(birthweight_tidy, 100) %>% 
+    mutate(
+        train = map(train, as.tibble),
+        test = map(test,as.tibble)
+    )  %>%
+  mutate(
+    model_fit1  = map(train, ~lm(bwt ~ babysex + bhead + delwt + fincome + gaweeks + mheight + mrace + parity + smoken,
+                                 data = birthweight_tidy)),
+    model_fit2  = map(train, ~lm(bwt ~ blength + gaweeks, data = birthweight_tidy)),
+    model_fit3  = map(train, ~lm(bwt ~ blength + bhead + babysex + blength*bhead + blength* babysex + bhead*babysex + blength*bhead*babysex, data = birthweight_tidy))) %>% 
+  mutate(
+    rmse_1 = map2_dbl(model_fit1, test, ~rmse(model = .x, data = .y)),
+    rmse_2 = map2_dbl(model_fit2 , test, ~rmse(model = .x, data = .y)),
+    rmse_3 = map2_dbl(model_fit3, test, ~rmse(model = .x, data = .y))) 
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + 
+  geom_violin() +
+  labs(title = "Cross-Validated Prediction Error Comparison Graph", 
+       x = "Models", 
+       y = "RMSE")  +
+  scale_x_discrete(labels = c("My Model", "Test Model 1", "Test Model 2")) 
+```
+
+With the lowest RMSE, test model 1 is potentially the most fitted model among these three models and can be further explored.
